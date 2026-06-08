@@ -1237,6 +1237,7 @@ function esc(s) {
 
 // ═══════════════════════════════════════════════════
 // GOOGLE SHEETS SYNC
+// Everything goes through GET + JSONP — no CORS issues from any origin.
 // ═══════════════════════════════════════════════════
 var _syncTimer = null;
 
@@ -1246,64 +1247,13 @@ function scheduleSync() {
   _syncTimer = setTimeout(pushToSheets, 6000);
 }
 
-function pushToSheets() {
-  if (!SHEETS_URL) return Promise.resolve();
-  setSyncStatus('syncing');
-
-  // Use a hidden iframe + form POST — bypasses CORS entirely for writes.
-  // The iframe absorbs the response so there is no CORS error.
-  return new Promise(function(resolve) {
-    var iframeName = '_rt_iframe_' + Date.now();
-    var iframe = document.createElement('iframe');
-    iframe.name = iframeName;
-    iframe.style.display = 'none';
-    document.body.appendChild(iframe);
-
-    var form = document.createElement('form');
-    form.method = 'POST';
-    form.action = SHEETS_URL;
-    form.target = iframeName;
-    form.style.display = 'none';
-
-    var input = document.createElement('input');
-    input.type = 'hidden';
-    input.name = 'data';
-    input.value = JSON.stringify(state);
-    form.appendChild(input);
-    document.body.appendChild(form);
-
-    // We cannot read the iframe response due to cross-origin rules,
-    // so we optimistically mark success after a short delay.
-    var timer = setTimeout(function() {
-      if (iframe.parentNode) iframe.parentNode.removeChild(iframe);
-      if (form.parentNode) form.parentNode.removeChild(form);
-      setSyncStatus('ok');
-      store.set('last_backup', new Date().toISOString());
-      updateLastBackupLabel();
-      resolve();
-    }, 3000);
-
-    iframe.onerror = function() {
-      clearTimeout(timer);
-      if (iframe.parentNode) iframe.parentNode.removeChild(iframe);
-      if (form.parentNode) form.parentNode.removeChild(form);
-      setSyncStatus('err');
-      resolve();
-    };
-
-    form.submit();
-  });
-}
-
-function fetchFromSheets(cb) {
-  if (!SHEETS_URL) { cb(null, false); return; }
-
-  // JSONP GET — no CORS preflight, works from GitHub Pages
-  var cbName = '_rt_fetch_' + Date.now();
+function jsonpCall(url, callback) {
+  var cbName = '_rt_' + Date.now() + '_' + Math.floor(Math.random()*9999);
   var script = document.createElement('script');
   var timer = setTimeout(function() {
-    cleanup(); cb(null, false);
-  }, 10000);
+    cleanup();
+    callback(null);
+  }, 12000);
 
   function cleanup() {
     clearTimeout(timer);
@@ -1313,19 +1263,54 @@ function fetchFromSheets(cb) {
 
   window[cbName] = function(data) {
     cleanup();
-    cb(data, true);
+    callback(data);
   };
 
-  script.src = SHEETS_URL + '?action=load&callback=' + cbName + '&nocache=' + Date.now();
-  script.onerror = function() { cleanup(); cb(null, false); };
+  script.src = url + (url.indexOf('?') > -1 ? '&' : '?') + 'callback=' + cbName;
+  script.onerror = function() { cleanup(); callback(null); };
   document.head.appendChild(script);
+}
+
+function pushToSheets() {
+  if (!SHEETS_URL) return Promise.resolve();
+  setSyncStatus('syncing');
+
+  var url = SHEETS_URL
+    + '?action=save'
+    + '&data=' + encodeURIComponent(JSON.stringify(state))
+    + '&nocache=' + Date.now();
+
+  return new Promise(function(resolve) {
+    jsonpCall(url, function(result) {
+      if (result && result.status === 'ok') {
+        setSyncStatus('ok');
+        store.set('last_backup', new Date().toISOString());
+        updateLastBackupLabel();
+      } else {
+        setSyncStatus('err');
+      }
+      resolve();
+    });
+  });
+}
+
+function fetchFromSheets(cb) {
+  if (!SHEETS_URL) { cb(null, false); return; }
+
+  var url = SHEETS_URL + '?action=load&nocache=' + Date.now();
+  jsonpCall(url, function(data) {
+    if (data && (Array.isArray(data.books) || Array.isArray(data.logs))) {
+      cb(data, true);
+    } else {
+      cb(null, false);
+    }
+  });
 }
 
 function mergeFromSheets(remote) {
   if (!remote || typeof remote !== 'object') return false;
   var changed = false;
 
-  // Books: add any not present locally
   if (Array.isArray(remote.books)) {
     var localIds = new Set(state.books.map(function(b){return b.id;}));
     remote.books.forEach(function(b) {
@@ -1333,7 +1318,6 @@ function mergeFromSheets(remote) {
     });
   }
 
-  // Logs: add any not present locally
   if (Array.isArray(remote.logs)) {
     var localLogIds = new Set(state.logs.map(function(l){return l.id;}));
     remote.logs.forEach(function(l) {
@@ -1401,8 +1385,6 @@ function doBackup() {
   pushToSheets().then(function() {
     status.innerHTML = '<span style="color:var(--gold-light)">✓ Pushed. ' + state.books.length + ' books, ' + state.logs.length + ' log entries.</span>';
     setTimeout(function(){ if (status) status.innerHTML = ''; }, 6000);
-  }).catch(function() {
-    status.innerHTML = '<span style="color:#c97b7b">✗ Push failed. Check your URL.</span>';
   });
 }
 
@@ -1415,17 +1397,20 @@ function doRestore() {
   status.innerHTML = '<span style="color:var(--gold-light)">Fetching from Google Sheets…</span>';
   fetchFromSheets(function(remote, ok) {
     if (!ok || !remote) {
-      status.innerHTML = '<span style="color:#c97b7b">Could not reach sheet. Check URL.</span>';
+      status.innerHTML = '<span style="color:#c97b7b">Could not reach sheet. Check URL and redeploy.</span>';
       return;
     }
+    var prev = state.books.length;
     var changed = mergeFromSheets(remote);
     if (changed) {
       renderAll();
-      status.innerHTML = '<span style="color:var(--gold-light)">✓ Merged data from sheet.</span>';
+      status.innerHTML = '<span style="color:var(--gold-light)">✓ Loaded ' + state.books.length + ' books from sheet.</span>';
+    } else if (state.books.length > 0) {
+      status.innerHTML = '<span style="color:var(--ink-soft)">Already up to date (' + state.books.length + ' books).</span>';
     } else {
-      status.innerHTML = '<span style="color:var(--ink-soft)">Already up to date.</span>';
+      status.innerHTML = '<span style="color:#c97b7b">Sheet appears empty. Try pushing first.</span>';
     }
-    setTimeout(function(){ if (status) status.innerHTML = ''; }, 5000);
+    setTimeout(function(){ if (status) status.innerHTML = ''; }, 6000);
   });
 }
 
