@@ -1249,38 +1249,68 @@ function scheduleSync() {
 function pushToSheets() {
   if (!SHEETS_URL) return Promise.resolve();
   setSyncStatus('syncing');
-  return fetch(SHEETS_URL, {
-    method: 'POST',
-    redirect: 'follow',
-    headers: { 'Content-Type': 'text/plain' },
-    body: JSON.stringify(state)
-  }).then(function(r) { return r.text(); })
-    .then(function(text) {
-      if (text && text.trim() === 'ok') {
+
+  // Use JSONP GET to avoid CORS entirely — Apps Script handles action=save
+  var url = SHEETS_URL
+    + '?action=save'
+    + '&data=' + encodeURIComponent(JSON.stringify(state))
+    + '&nocache=' + Date.now();
+
+  return new Promise(function(resolve) {
+    var cbName = '_rt_push_' + Date.now();
+    var script = document.createElement('script');
+    var timer = setTimeout(function() {
+      cleanup(); setSyncStatus('err'); resolve();
+    }, 10000);
+
+    function cleanup() {
+      clearTimeout(timer);
+      delete window[cbName];
+      if (script.parentNode) script.parentNode.removeChild(script);
+    }
+
+    window[cbName] = function(result) {
+      cleanup();
+      if (result && result.status === 'ok') {
         setSyncStatus('ok');
         store.set('last_backup', new Date().toISOString());
         updateLastBackupLabel();
       } else {
         setSyncStatus('err');
       }
-    }).catch(function() {
-      setSyncStatus('err');
-    });
+      resolve();
+    };
+
+    script.src = url + '&callback=' + cbName;
+    script.onerror = function() { cleanup(); setSyncStatus('err'); resolve(); };
+    document.head.appendChild(script);
+  });
 }
 
 function fetchFromSheets(cb) {
   if (!SHEETS_URL) { cb(null, false); return; }
-  fetch(SHEETS_URL, { redirect: 'follow' })
-    .then(function(r) { return r.text(); })
-    .then(function(text) {
-      try {
-        var data = JSON.parse(text);
-        cb(data, true);
-      } catch(e) {
-        cb(null, false);
-      }
-    })
-    .catch(function() { cb(null, false); });
+
+  // JSONP GET — no CORS preflight, works from any origin
+  var cbName = '_rt_fetch_' + Date.now();
+  var script = document.createElement('script');
+  var timer = setTimeout(function() {
+    cleanup(); cb(null, false);
+  }, 10000);
+
+  function cleanup() {
+    clearTimeout(timer);
+    delete window[cbName];
+    if (script.parentNode) script.parentNode.removeChild(script);
+  }
+
+  window[cbName] = function(data) {
+    cleanup();
+    cb(data, true);
+  };
+
+  script.src = SHEETS_URL + '?action=load&callback=' + cbName + '&nocache=' + Date.now();
+  script.onerror = function() { cleanup(); cb(null, false); };
+  document.head.appendChild(script);
 }
 
 function mergeFromSheets(remote) {
