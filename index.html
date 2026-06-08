@@ -877,7 +877,7 @@ function loadState() {
 
 function saveState() {
   store.set('state_v1', JSON.stringify(state));
-  scheduleSync();
+  // No auto-sync — push manually to avoid overwriting sheet from a new device
 }
 
 // ═══════════════════════════════════════════════════
@@ -1445,14 +1445,26 @@ document.getElementById('log-pages').addEventListener('keydown', function(e) {
   renderAll();
   setSyncStatus('idle');
 
-  // Auto-fetch on load
+  // On load: if localStorage is empty AND we have a sheet URL,
+  // pull from sheet automatically (new device / cleared cache scenario).
+  // If localStorage has data, do NOT auto-push — protect the sheet.
   if (SHEETS_URL) {
-    fetchFromSheets(function(remote, ok) {
-      if (ok && remote) {
-        var changed = mergeFromSheets(remote);
-        if (changed) renderAll();
-      }
-    });
+    var hasLocalData = state.books.length > 0;
+    if (!hasLocalData) {
+      // New device — try to load from sheet
+      setSyncStatus('syncing');
+      fetchFromSheets(function(remote, ok) {
+        if (ok && remote && Array.isArray(remote.books) && remote.books.length > 0) {
+          mergeFromSheets(remote);
+          store.set('state_v1', JSON.stringify(state));
+          renderAll();
+          setSyncStatus('ok');
+          setTimeout(function(){ setSyncStatus('idle'); }, 3000);
+        } else {
+          setSyncStatus('idle');
+        }
+      });
+    }
   }
 })();
 </script>
