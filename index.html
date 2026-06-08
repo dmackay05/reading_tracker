@@ -1251,16 +1251,21 @@ function pushToSheets() {
   setSyncStatus('syncing');
   return fetch(SHEETS_URL, {
     method: 'POST',
-    mode: 'no-cors',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: 'data=' + encodeURIComponent(JSON.stringify(state))
-  }).then(function() {
-    setSyncStatus('ok');
-    store.set('last_backup', new Date().toISOString());
-    updateLastBackupLabel();
-  }).catch(function() {
-    setSyncStatus('err');
-  });
+    redirect: 'follow',
+    headers: { 'Content-Type': 'text/plain' },
+    body: JSON.stringify(state)
+  }).then(function(r) { return r.text(); })
+    .then(function(text) {
+      if (text && text.trim() === 'ok') {
+        setSyncStatus('ok');
+        store.set('last_backup', new Date().toISOString());
+        updateLastBackupLabel();
+      } else {
+        setSyncStatus('err');
+      }
+    }).catch(function() {
+      setSyncStatus('err');
+    });
 }
 
 function fetchFromSheets(cb) {
