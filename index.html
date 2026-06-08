@@ -1265,10 +1265,30 @@ function pushToSheets() {
 
 function fetchFromSheets(cb) {
   if (!SHEETS_URL) { cb(null, false); return; }
-  fetch(SHEETS_URL + '?nocache=' + Date.now())
-    .then(function(r){return r.json();})
-    .then(function(data){cb(data, true);})
-    .catch(function(){cb(null, false);});
+
+  // Use JSONP so the browser never fires a CORS preflight on GET.
+  // Apps Script doGet wraps the response: callback({...})
+  var cbName = '_rt_cb_' + Date.now();
+  var script = document.createElement('script');
+  var timer = setTimeout(function() {
+    cleanup();
+    cb(null, false);
+  }, 10000);
+
+  function cleanup() {
+    clearTimeout(timer);
+    delete window[cbName];
+    if (script.parentNode) script.parentNode.removeChild(script);
+  }
+
+  window[cbName] = function(data) {
+    cleanup();
+    cb(data, true);
+  };
+
+  script.src = SHEETS_URL + '?callback=' + cbName + '&nocache=' + Date.now();
+  script.onerror = function() { cleanup(); cb(null, false); };
+  document.head.appendChild(script);
 }
 
 function mergeFromSheets(remote) {
