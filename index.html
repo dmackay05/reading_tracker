@@ -1250,47 +1250,55 @@ function pushToSheets() {
   if (!SHEETS_URL) return Promise.resolve();
   setSyncStatus('syncing');
 
-  // Use JSONP GET to avoid CORS entirely — Apps Script handles action=save
-  var url = SHEETS_URL
-    + '?action=save'
-    + '&data=' + encodeURIComponent(JSON.stringify(state))
-    + '&nocache=' + Date.now();
-
+  // Use a hidden iframe + form POST — bypasses CORS entirely for writes.
+  // The iframe absorbs the response so there is no CORS error.
   return new Promise(function(resolve) {
-    var cbName = '_rt_push_' + Date.now();
-    var script = document.createElement('script');
+    var iframeName = '_rt_iframe_' + Date.now();
+    var iframe = document.createElement('iframe');
+    iframe.name = iframeName;
+    iframe.style.display = 'none';
+    document.body.appendChild(iframe);
+
+    var form = document.createElement('form');
+    form.method = 'POST';
+    form.action = SHEETS_URL;
+    form.target = iframeName;
+    form.style.display = 'none';
+
+    var input = document.createElement('input');
+    input.type = 'hidden';
+    input.name = 'data';
+    input.value = JSON.stringify(state);
+    form.appendChild(input);
+    document.body.appendChild(form);
+
+    // We cannot read the iframe response due to cross-origin rules,
+    // so we optimistically mark success after a short delay.
     var timer = setTimeout(function() {
-      cleanup(); setSyncStatus('err'); resolve();
-    }, 10000);
+      if (iframe.parentNode) iframe.parentNode.removeChild(iframe);
+      if (form.parentNode) form.parentNode.removeChild(form);
+      setSyncStatus('ok');
+      store.set('last_backup', new Date().toISOString());
+      updateLastBackupLabel();
+      resolve();
+    }, 3000);
 
-    function cleanup() {
+    iframe.onerror = function() {
       clearTimeout(timer);
-      delete window[cbName];
-      if (script.parentNode) script.parentNode.removeChild(script);
-    }
-
-    window[cbName] = function(result) {
-      cleanup();
-      if (result && result.status === 'ok') {
-        setSyncStatus('ok');
-        store.set('last_backup', new Date().toISOString());
-        updateLastBackupLabel();
-      } else {
-        setSyncStatus('err');
-      }
+      if (iframe.parentNode) iframe.parentNode.removeChild(iframe);
+      if (form.parentNode) form.parentNode.removeChild(form);
+      setSyncStatus('err');
       resolve();
     };
 
-    script.src = url + '&callback=' + cbName;
-    script.onerror = function() { cleanup(); setSyncStatus('err'); resolve(); };
-    document.head.appendChild(script);
+    form.submit();
   });
 }
 
 function fetchFromSheets(cb) {
   if (!SHEETS_URL) { cb(null, false); return; }
 
-  // JSONP GET — no CORS preflight, works from any origin
+  // JSONP GET — no CORS preflight, works from GitHub Pages
   var cbName = '_rt_fetch_' + Date.now();
   var script = document.createElement('script');
   var timer = setTimeout(function() {
